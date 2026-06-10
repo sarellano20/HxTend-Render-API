@@ -1372,7 +1372,6 @@ PANEL_HTML = """
     };
 
     let loginTestPassed = false;
-    let forcingOffline = false;
     let processorPreviewOn = false;
     let previewRevealAt = 0;
     let previewRevealTimer = null;
@@ -1444,7 +1443,6 @@ PANEL_HTML = """
       $("loginView").classList.add("hidden");
       $("panelView").classList.remove("hidden");
       $("deviceLabel").textContent = session.deviceId;
-      forcingOffline = false;
       processorPreviewOn = false;
       previewRevealAt = 0;
       updatePreviewVisibility();
@@ -1555,24 +1553,6 @@ PANEL_HTML = """
       $("processorText").textContent = online ? "Procesadora online" : "Procesadora offline";
     }
 
-    function forceOfflineLogin() {
-      if (forcingOffline) {
-        return;
-      }
-
-      forcingOffline = true;
-      processorPreviewOn = false;
-      previewRevealAt = 0;
-      feeds["8001"].online = false;
-      releaseFeedImage("8001");
-      setProcessorOnline(false);
-      localStorage.removeItem(STORAGE_KEY);
-      setLoginReady(false);
-      showLogin();
-      setOfflineBanner("OFFLINE");
-      setLoginMessage("Offline: la procesadora dejó de enviar información. Ejecuta Test processor para volver a entrar.");
-    }
-
     function isMobileLayout() {
       return window.matchMedia("(max-width: 680px)").matches;
     }
@@ -1627,7 +1607,7 @@ PANEL_HTML = """
 
     async function refreshState() {
       try {
-        const [response, processorTest] = await Promise.all([
+        const [response, processorTestResult] = await Promise.allSettled([
           fetch("/api/stream/state", {
             cache: "no-store",
             headers: authHeaders()
@@ -1635,18 +1615,19 @@ PANEL_HTML = """
           fetchProcessorTest()
         ]);
 
-        if (!response.ok) {
+        if (response.status !== "fulfilled" || !response.value.ok) {
           throw new Error("No se pudo leer el estado");
         }
 
-        if (!processorTest.connected || !processorTest.receiving_info) {
-          forceOfflineLogin();
-          return;
+        const data = await response.value.json();
+        let processorOnline = !!data.processor_online;
+
+        if (processorTestResult.status === "fulfilled") {
+          processorOnline = !!processorTestResult.value.connected;
         }
 
-        const data = await response.json();
-        const processorOnline = !!processorTest.connected;
         setProcessorOnline(processorOnline);
+        $("controlStatus").textContent = processorOnline ? "Listo" : "Offline";
 
         for (const id of Object.keys(feeds)) {
           const info = data.feeds[id] || {};
@@ -1662,7 +1643,10 @@ PANEL_HTML = """
         updatePreviewVisibility();
         $("lastUpdate").textContent = "Actualizado " + new Date().toLocaleTimeString();
       } catch {
-        forceOfflineLogin();
+        setProcessorOnline(false);
+        feeds["8001"].online = false;
+        $("controlStatus").textContent = "Offline";
+        updatePreviewVisibility();
       }
     }
 
