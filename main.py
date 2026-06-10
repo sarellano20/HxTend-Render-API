@@ -24,7 +24,7 @@ DEFAULT_DEVICE_ID = os.getenv("DEVICE_ID", "procesadora-01").strip()
 
 COMMAND_TIMEOUT_SECONDS = int(os.getenv("COMMAND_TIMEOUT_SECONDS", "30"))
 DEVICE_ONLINE_SECONDS = int(os.getenv("DEVICE_ONLINE_SECONDS", "30"))
-STREAM_ONLINE_SECONDS = float(os.getenv("HXTEND_STREAM_ONLINE_SECONDS", "8"))
+STREAM_ONLINE_SECONDS = float(os.getenv("HXTEND_STREAM_ONLINE_SECONDS", "3.5"))
 MAX_COMMAND_HISTORY = int(os.getenv("MAX_COMMAND_HISTORY", "1000"))
 MAX_STREAM_FRAME_BYTES = int(os.getenv("HXTEND_MAX_STREAM_FRAME_BYTES", "2500000"))
 
@@ -916,7 +916,7 @@ PANEL_HTML = """
       align-items: start;
     }
 
-    .panel, .stream-card, .empty-stream {
+    .panel, .stream-card, .stage-card {
       border: 1px solid var(--line);
       border-radius: 8px;
       background: rgba(17,24,32,.94);
@@ -1021,8 +1021,18 @@ PANEL_HTML = """
       font-weight: 750;
     }
 
-    .empty-stream {
-      min-height: 260px;
+    .stage-area {
+      min-width: 0;
+    }
+
+    .stage-area.hidden + .panel {
+      grid-column: 1 / -1;
+      width: min(460px, 100%);
+      justify-self: center;
+    }
+
+    .stage-card {
+      min-height: 300px;
       display: grid;
       place-items: center;
       text-align: center;
@@ -1030,7 +1040,7 @@ PANEL_HTML = """
       color: var(--muted);
     }
 
-    .standby-mark {
+    .stage-mark {
       width: 56px;
       height: 56px;
       display: grid;
@@ -1041,6 +1051,37 @@ PANEL_HTML = """
       color: var(--cyan);
       font-weight: 900;
       margin: 0 auto 14px;
+    }
+
+    .stage-card.offline .stage-mark {
+      border-color: #60323b;
+      background: #241116;
+      color: #ffd3da;
+    }
+
+    .stage-card.loading .stage-mark {
+      border-color: #3d6574;
+      background: #102630;
+      color: #dff8ff;
+    }
+
+    .pulse-ring {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: var(--cyan);
+      box-shadow: 0 0 0 0 rgba(93,215,255,.4);
+      animation: pulse 1.35s ease-out infinite;
+    }
+
+    @keyframes pulse {
+      70% { box-shadow: 0 0 0 15px rgba(93,215,255,0); }
+      100% { box-shadow: 0 0 0 0 rgba(93,215,255,0); }
+    }
+
+    .stage-title {
+      margin-bottom: 6px;
+      font-size: 18px;
     }
 
     .log {
@@ -1075,11 +1116,82 @@ PANEL_HTML = """
     }
 
     @media (max-width: 680px) {
-      .app { width: min(100vw - 18px, 1180px); padding-top: 14px; }
-      .topbar { flex-direction: column; }
-      .preview-grid { grid-template-columns: 1fr; }
-      .control-grid, .wide-grid { grid-template-columns: 1fr; }
-      .status-pill { width: 100%; justify-content: center; }
+      html, body { height: 100%; overflow: hidden; }
+      .app {
+        width: 100%;
+        height: 100svh;
+        padding: 10px;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+      }
+      .topbar {
+        flex: 0 0 auto;
+        flex-direction: row;
+        align-items: center;
+        margin-bottom: 8px;
+      }
+      h1 { font-size: 20px; }
+      .title-stack .muted { display: none; }
+      .status-pill {
+        min-height: 32px;
+        padding: 0 10px;
+        font-size: 12px;
+        white-space: normal;
+        text-align: center;
+      }
+      .layout {
+        flex: 1 1 auto;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+      .panel {
+        order: 0;
+        position: static;
+        flex: 0 0 auto;
+        padding: 10px;
+      }
+      .panel-head { margin-bottom: 8px; }
+      .controls { gap: 7px; }
+      .control-grid {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 6px;
+      }
+      .wide-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 6px;
+      }
+      button {
+        min-height: 38px;
+        padding: 6px 7px;
+        font-size: 12px;
+      }
+      .power-toggle { min-height: 44px; font-size: 13px; }
+      .log { display: none; }
+      .session-row { display: none; }
+      .stage-area {
+        order: 1;
+        flex: 1 1 auto;
+        min-height: 0;
+      }
+      .preview-grid {
+        height: 100%;
+        grid-template-columns: 1fr;
+      }
+      .stream-card { height: 100%; }
+      .stream-head { min-height: 38px; }
+      .viewer {
+        aspect-ratio: auto;
+        height: calc(100% - 38px);
+        min-height: 0;
+      }
+      .stage-card {
+        min-height: 0;
+        height: 100%;
+        padding: 16px;
+      }
     }
   </style>
 </head>
@@ -1122,12 +1234,20 @@ PANEL_HTML = """
     </div>
 
     <div class="layout">
-      <section>
-        <div id="emptyStream" class="empty-stream">
+      <section id="stageArea" class="stage-area hidden">
+        <div id="loadingStage" class="stage-card loading hidden">
           <div>
-            <div class="standby-mark">HX</div>
-            <h2 id="emptyStreamTitle">Processor standby</h2>
-            <p id="emptyStreamText" class="muted">Vista en espera.</p>
+            <div class="stage-mark"><span class="pulse-ring"></span></div>
+            <h2 class="stage-title">Preparando processor</h2>
+            <p id="loadingStageText" class="muted">Sincronizando video.</p>
+          </div>
+        </div>
+
+        <div id="offlineStage" class="stage-card offline hidden">
+          <div>
+            <div class="stage-mark">OFF</div>
+            <h2 class="stage-title">Procesadora offline</h2>
+            <p class="muted">Esperando reconexión de la caja.</p>
           </div>
         </div>
 
@@ -1192,6 +1312,8 @@ PANEL_HTML = """
     };
 
     let processorPreviewOn = false;
+    let previewRevealAt = 0;
+    let previewRevealTimer = null;
     let stateTimer = null;
     let snapshotTimer = null;
 
@@ -1242,6 +1364,7 @@ PANEL_HTML = """
       $("panelView").classList.remove("hidden");
       $("deviceLabel").textContent = session.deviceId;
       processorPreviewOn = false;
+      previewRevealAt = 0;
       updatePreviewVisibility();
       startLoops();
     }
@@ -1294,6 +1417,21 @@ PANEL_HTML = """
       $("processorText").textContent = online ? "Procesadora online" : "Procesadora offline";
     }
 
+    function isMobileLayout() {
+      return window.matchMedia("(max-width: 680px)").matches;
+    }
+
+    function previewDelayRemaining() {
+      return Math.max(0, previewRevealAt - Date.now());
+    }
+
+    function clearPreviewRevealTimer() {
+      if (previewRevealTimer) {
+        clearTimeout(previewRevealTimer);
+        previewRevealTimer = null;
+      }
+    }
+
     function releaseFeedImage(id) {
       const feed = feeds[id];
       const image = $("feed" + id);
@@ -1308,22 +1446,25 @@ PANEL_HTML = """
 
     function updatePreviewVisibility() {
       const feed = feeds["8001"];
-      const showProcessor = processorPreviewOn && !!feed.online;
+      const waitingReveal = processorPreviewOn && !!feed.online && previewDelayRemaining() > 0;
+      const showProcessor = processorPreviewOn && !!feed.online && !waitingReveal;
+      const showOffline = processorPreviewOn && !feed.online;
 
       $("powerToggleButton").classList.toggle("on", processorPreviewOn);
+      $("stageArea").classList.toggle("hidden", !processorPreviewOn);
       $("card8001").classList.toggle("hidden", !showProcessor);
       $("previewGrid").classList.toggle("hidden", !showProcessor);
-      $("emptyStream").classList.toggle("hidden", showProcessor);
+      $("loadingStage").classList.toggle("hidden", !waitingReveal);
+      $("offlineStage").classList.toggle("hidden", !showOffline);
 
-      if (showProcessor) {
-        $("emptyStreamTitle").textContent = "Processor online";
-        $("emptyStreamText").textContent = "";
-      } else if (processorPreviewOn) {
-        $("emptyStreamTitle").textContent = "Processor sin video";
-        $("emptyStreamText").textContent = "Sin senal de video.";
-      } else {
-        $("emptyStreamTitle").textContent = "Processor standby";
-        $("emptyStreamText").textContent = "Vista en espera.";
+      if (waitingReveal) {
+        const seconds = Math.ceil(previewDelayRemaining() / 1000);
+        $("loadingStageText").textContent = isMobileLayout()
+          ? `Abriendo en ${seconds}s.`
+          : "Sincronizando video.";
+      }
+
+      if (!processorPreviewOn || !showProcessor) {
         releaseFeedImage("8001");
       }
     }
@@ -1358,6 +1499,8 @@ PANEL_HTML = """
         $("lastUpdate").textContent = "Actualizado " + new Date().toLocaleTimeString();
       } catch {
         setProcessorOnline(false);
+        feeds["8001"].online = false;
+        updatePreviewVisibility();
         $("controlStatus").textContent = "Sin estado";
       }
     }
@@ -1365,7 +1508,7 @@ PANEL_HTML = """
     async function pullSnapshot(id) {
       const feed = feeds[id];
 
-      if (!processorPreviewOn || !feed.online || feed.inFlight) {
+      if (!processorPreviewOn || previewDelayRemaining() > 0 || !feed.online || feed.inFlight) {
         return;
       }
 
@@ -1453,10 +1596,24 @@ PANEL_HTML = """
 
       processorPreviewOn = !processorPreviewOn;
       if (!processorPreviewOn) {
+        clearPreviewRevealTimer();
+        previewRevealAt = 0;
         releaseFeedImage("8001");
         $("panelLog").textContent = "Processor oculto.";
       } else {
-        $("panelLog").textContent = "Processor activo.";
+        const delay = isMobileLayout() ? 6000 : 0;
+        previewRevealAt = Date.now() + delay;
+        clearPreviewRevealTimer();
+        if (delay > 0) {
+          previewRevealTimer = setTimeout(() => {
+            previewRevealTimer = null;
+            updatePreviewVisibility();
+            pullSnapshot("8001");
+          }, delay + 50);
+          $("panelLog").textContent = "Processor activándose.";
+        } else {
+          $("panelLog").textContent = "Processor activo.";
+        }
       }
       updatePreviewVisibility();
       refreshState();
@@ -1465,13 +1622,14 @@ PANEL_HTML = """
     function startLoops() {
       stopLoops();
       refreshState();
-      stateTimer = setInterval(refreshState, 900);
+      stateTimer = setInterval(refreshState, 600);
       snapshotTimer = setInterval(pullSnapshots, 70);
     }
 
     function stopLoops() {
       if (stateTimer) clearInterval(stateTimer);
       if (snapshotTimer) clearInterval(snapshotTimer);
+      clearPreviewRevealTimer();
       stateTimer = null;
       snapshotTimer = null;
 
