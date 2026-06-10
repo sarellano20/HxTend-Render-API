@@ -779,3 +779,50 @@ PANEL_HTML = """
 </body>
 </html>
 """
+import hmac as _hxtend_hmac
+
+
+def _hxtend_token_candidates():
+    names = (
+        "HXTEND_STREAM_TOKEN",
+        "HXTEND_CONTROL_TOKEN",
+        "HXTEND_API_TOKEN",
+        "HXTEND_PANEL_TOKEN",
+        "HXTEND_REMOTE_TOKEN",
+        "API_TOKEN",
+        "PANEL_TOKEN",
+        "CONTROL_TOKEN",
+        "STREAM_TOKEN",
+    )
+    tokens = []
+    for name in names:
+        value = os.getenv(name, "")
+        if value and value.strip():
+            tokens.append(value.strip())
+
+    for value in os.getenv("HXTEND_ALLOWED_TOKENS", "").split(","):
+        if value and value.strip():
+            tokens.append(value.strip())
+
+    return tuple(dict.fromkeys(tokens))
+
+
+def authorize(request):
+    tokens = _hxtend_token_candidates()
+    if not tokens:
+        return
+
+    raw = (request.headers.get("Authorization") or "").strip()
+    submitted = raw
+    if raw.lower().startswith("bearer "):
+        submitted = raw[7:].strip()
+
+    query_token = (request.query_params.get("token") or "").strip()
+    submitted_values = [value for value in (submitted, query_token) if value]
+
+    for submitted_value in submitted_values:
+        for expected in tokens:
+            if _hxtend_hmac.compare_digest(submitted_value, expected):
+                return
+
+    raise HTTPException(status_code=401, detail="Invalid token")
