@@ -45,7 +45,6 @@ ALLOWED_ACTIONS = {
     "power_on_toggle",
     "power_off_press",
     "power_off_release",
-    "power_off_toggle",
 }
 
 
@@ -93,7 +92,6 @@ class FeedState:
 
 STREAMS: Dict[str, FeedState] = {
     "8001": FeedState(),
-    "8002": FeedState(),
 }
 
 
@@ -730,15 +728,16 @@ PANEL_HTML = """
     :root {
       color-scheme: dark;
       --bg: #080a0d;
-      --surface: #10151b;
-      --surface-2: #141b22;
-      --line: #27323d;
+      --surface: #111820;
+      --surface-2: #17212a;
+      --line: #2a3640;
       --text: #f2f7fb;
       --muted: #a7b2bd;
       --green: #42d392;
       --red: #ff5f6d;
       --cyan: #5dd7ff;
       --amber: #ffca6a;
+      --violet: #b8a8ff;
       --button: #1d2a35;
       --button-hover: #243746;
     }
@@ -749,7 +748,10 @@ PANEL_HTML = """
       margin: 0;
       min-height: 100vh;
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-      background: var(--bg);
+      background:
+        linear-gradient(135deg, rgba(93,215,255,.08), transparent 28%),
+        linear-gradient(315deg, rgba(255,202,106,.08), transparent 32%),
+        #080a0d;
       color: var(--text);
     }
 
@@ -821,8 +823,8 @@ PANEL_HTML = """
       display: grid;
       place-items: center;
       background: #122632;
-      border: 1px solid #244250;
-      color: var(--cyan);
+      border: 1px solid #31535f;
+      color: #d9f7ff;
       font-weight: 900;
     }
 
@@ -909,7 +911,7 @@ PANEL_HTML = """
 
     .layout {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) 330px;
+      grid-template-columns: minmax(0, 1fr) 340px;
       gap: 16px;
       align-items: start;
     }
@@ -917,10 +919,15 @@ PANEL_HTML = """
     .panel, .stream-card, .empty-stream {
       border: 1px solid var(--line);
       border-radius: 8px;
-      background: var(--surface);
+      background: rgba(17,24,32,.94);
+      box-shadow: 0 18px 54px rgba(0,0,0,.26);
     }
 
-    .panel { padding: 14px; }
+    .panel {
+      padding: 14px;
+      position: sticky;
+      top: 16px;
+    }
 
     .panel-head {
       display: flex;
@@ -958,19 +965,31 @@ PANEL_HTML = """
     .accent { border-color: #2a5364; background: #102936; }
     .accent:hover { border-color: var(--cyan); background: #143747; }
 
+    .power-toggle {
+      min-height: 52px;
+      background: #15352d;
+      border-color: #2f6d58;
+      color: #e9fff6;
+    }
+
+    .power-toggle:hover { background: #194538; border-color: var(--green); }
+    .power-toggle.on { background: #4a2516; border-color: #b45e33; }
+    .power-toggle.on:hover { background: #5a2b18; border-color: var(--amber); }
+
     .preview-grid {
       display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-columns: minmax(0, 1fr);
       gap: 12px;
     }
 
     .stream-card {
       overflow: hidden;
       min-width: 0;
+      border-color: #304451;
     }
 
     .stream-head {
-      height: 42px;
+      min-height: 46px;
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -1011,6 +1030,19 @@ PANEL_HTML = """
       color: var(--muted);
     }
 
+    .standby-mark {
+      width: 56px;
+      height: 56px;
+      display: grid;
+      place-items: center;
+      border-radius: 8px;
+      border: 1px solid #345162;
+      background: #111f27;
+      color: var(--cyan);
+      font-weight: 900;
+      margin: 0 auto 14px;
+    }
+
     .log {
       min-height: 38px;
       padding: 10px;
@@ -1039,7 +1071,7 @@ PANEL_HTML = """
 
     @media (max-width: 920px) {
       .layout { grid-template-columns: 1fr; }
-      .panel { order: -1; }
+      .panel { order: -1; position: static; }
     }
 
     @media (max-width: 680px) {
@@ -1058,7 +1090,7 @@ PANEL_HTML = """
         <div class="mark">HX</div>
         <div>
           <h1>Remote Control HxTend</h1>
-          <p class="muted">Acceso remoto del controlador y preview en vivo.</p>
+          <p class="muted">Panel operativo del processor.</p>
         </div>
       </div>
 
@@ -1093,29 +1125,20 @@ PANEL_HTML = """
       <section>
         <div id="emptyStream" class="empty-stream">
           <div>
-            <h2>Esperando transmisión activa</h2>
-            <p class="muted">Cuando la caja envíe video, el monitor aparece automáticamente.</p>
+            <div class="standby-mark">HX</div>
+            <h2 id="emptyStreamTitle">Processor standby</h2>
+            <p id="emptyStreamText" class="muted">Vista en espera.</p>
           </div>
         </div>
 
         <div id="previewGrid" class="preview-grid hidden">
           <article id="card8001" class="stream-card hidden">
             <div class="stream-head">
-              <h3>Monitor 8001</h3>
+              <h3>Processor</h3>
               <span id="feed8001Info" class="latency">offline</span>
             </div>
             <div class="viewer">
-              <img id="feed8001" alt="Monitor 8001">
-            </div>
-          </article>
-
-          <article id="card8002" class="stream-card hidden">
-            <div class="stream-head">
-              <h3>Monitor 8002</h3>
-              <span id="feed8002Info" class="latency">offline</span>
-            </div>
-            <div class="viewer">
-              <img id="feed8002" alt="Monitor 8002">
+              <img id="feed8001" alt="Processor">
             </div>
           </article>
         </div>
@@ -1141,10 +1164,7 @@ PANEL_HTML = """
 
           <button onclick="sendAction('white_balance')">White balance</button>
 
-          <div class="wide-grid">
-            <button class="accent" onclick="sendAction('power_on_toggle')">Toggle ON</button>
-            <button class="danger" onclick="sendAction('power_off_toggle')">Toggle OFF</button>
-          </div>
+          <button id="powerToggleButton" class="power-toggle" onclick="toggleProcessorPreview()">Toggle ON/OFF</button>
 
           <div id="panelLog" class="log">Panel conectado.</div>
 
@@ -1163,8 +1183,7 @@ PANEL_HTML = """
     const SNAPSHOT_INTERVAL_MS = Math.max(70, Math.round(1000 / PANEL_FPS));
 
     const feeds = {
-      "8001": { online: false, seq: -1, inFlight: false, objectUrl: "", lastPull: 0 },
-      "8002": { online: false, seq: -1, inFlight: false, objectUrl: "", lastPull: 0 }
+      "8001": { online: false, seq: -1, inFlight: false, objectUrl: "", lastPull: 0 }
     };
 
     let session = {
@@ -1172,6 +1191,7 @@ PANEL_HTML = """
       token: ""
     };
 
+    let processorPreviewOn = false;
     let stateTimer = null;
     let snapshotTimer = null;
 
@@ -1221,6 +1241,8 @@ PANEL_HTML = """
       $("loginView").classList.add("hidden");
       $("panelView").classList.remove("hidden");
       $("deviceLabel").textContent = session.deviceId;
+      processorPreviewOn = false;
+      updatePreviewVisibility();
       startLoops();
     }
 
@@ -1272,6 +1294,40 @@ PANEL_HTML = """
       $("processorText").textContent = online ? "Procesadora online" : "Procesadora offline";
     }
 
+    function releaseFeedImage(id) {
+      const feed = feeds[id];
+      const image = $("feed" + id);
+      if (image) {
+        image.removeAttribute("src");
+      }
+      if (feed && feed.objectUrl) {
+        URL.revokeObjectURL(feed.objectUrl);
+        feed.objectUrl = "";
+      }
+    }
+
+    function updatePreviewVisibility() {
+      const feed = feeds["8001"];
+      const showProcessor = processorPreviewOn && !!feed.online;
+
+      $("powerToggleButton").classList.toggle("on", processorPreviewOn);
+      $("card8001").classList.toggle("hidden", !showProcessor);
+      $("previewGrid").classList.toggle("hidden", !showProcessor);
+      $("emptyStream").classList.toggle("hidden", showProcessor);
+
+      if (showProcessor) {
+        $("emptyStreamTitle").textContent = "Processor online";
+        $("emptyStreamText").textContent = "";
+      } else if (processorPreviewOn) {
+        $("emptyStreamTitle").textContent = "Processor sin video";
+        $("emptyStreamText").textContent = "Sin senal de video.";
+      } else {
+        $("emptyStreamTitle").textContent = "Processor standby";
+        $("emptyStreamText").textContent = "Vista en espera.";
+        releaseFeedImage("8001");
+      }
+    }
+
     async function refreshState() {
       try {
         const response = await fetch("/api/stream/state", {
@@ -1285,8 +1341,6 @@ PANEL_HTML = """
 
         const data = await response.json();
         const processorOnline = !!data.processor_online;
-        let anyStream = false;
-
         setProcessorOnline(processorOnline);
 
         for (const id of Object.keys(feeds)) {
@@ -1294,16 +1348,13 @@ PANEL_HTML = """
           const online = !!info.online;
           feeds[id].online = online;
           feeds[id].seq = info.seq || feeds[id].seq;
-          anyStream = anyStream || online;
 
-          $("card" + id).classList.toggle("hidden", !online);
           $("feed" + id + "Info").textContent = online
             ? `${info.last_seen_seconds}s`
             : "offline";
         }
 
-        $("previewGrid").classList.toggle("hidden", !anyStream);
-        $("emptyStream").classList.toggle("hidden", anyStream);
+        updatePreviewVisibility();
         $("lastUpdate").textContent = "Actualizado " + new Date().toLocaleTimeString();
       } catch {
         setProcessorOnline(false);
@@ -1314,7 +1365,7 @@ PANEL_HTML = """
     async function pullSnapshot(id) {
       const feed = feeds[id];
 
-      if (!feed.online || feed.inFlight) {
+      if (!processorPreviewOn || !feed.online || feed.inFlight) {
         return;
       }
 
@@ -1386,10 +1437,29 @@ PANEL_HTML = """
 
         $("controlStatus").textContent = "Listo";
         $("panelLog").textContent = `${action} enviado. ID: ${data.command.id}`;
+        return true;
       } catch (error) {
         $("controlStatus").textContent = "Error";
         $("panelLog").textContent = error.message || "Error enviando comando";
+        return false;
       }
+    }
+
+    async function toggleProcessorPreview() {
+      const ok = await sendAction("power_on_toggle");
+      if (!ok) {
+        return;
+      }
+
+      processorPreviewOn = !processorPreviewOn;
+      if (!processorPreviewOn) {
+        releaseFeedImage("8001");
+        $("panelLog").textContent = "Processor oculto.";
+      } else {
+        $("panelLog").textContent = "Processor activo.";
+      }
+      updatePreviewVisibility();
+      refreshState();
     }
 
     function startLoops() {
