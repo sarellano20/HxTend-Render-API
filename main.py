@@ -1359,8 +1359,9 @@ PANEL_HTML = """
 
   <script>
     const STORAGE_KEY = "hxtend_remote_session_v3";
-    const PANEL_FPS = 12;
-    const SNAPSHOT_INTERVAL_MS = Math.max(70, Math.round(1000 / PANEL_FPS));
+    const PANEL_FPS = 40;
+    const SNAPSHOT_INTERVAL_MS = Math.max(20, Math.round(1000 / PANEL_FPS));
+    const SNAPSHOT_TICK_MS = Math.max(8, Math.floor(SNAPSHOT_INTERVAL_MS / 2));
 
     const feeds = {
       "8001": { online: false, seq: -1, inFlight: false, objectUrl: "", lastPull: 0 }
@@ -1609,19 +1610,16 @@ PANEL_HTML = """
 
     async function refreshState() {
       try {
-        const [response, processorTestResult] = await Promise.allSettled([
-          fetch("/api/stream/state", {
-            cache: "no-store",
-            headers: authHeaders()
-          }),
-          fetchProcessorTest()
-        ]);
+        const response = await fetch("/api/stream/state", {
+          cache: "no-store",
+          headers: authHeaders()
+        });
 
-        if (response.status !== "fulfilled" || !response.value.ok) {
+        if (!response.ok) {
           throw new Error("No se pudo leer el estado");
         }
 
-        const data = await response.value.json();
+        const data = await response.json();
         setProcessorOnline(true);
         $("controlStatus").textContent = "Listo";
 
@@ -1679,7 +1677,7 @@ PANEL_HTML = """
         feed.objectUrl = objectUrl;
 
         if (previous) {
-          setTimeout(() => URL.revokeObjectURL(previous), 500);
+          setTimeout(() => URL.revokeObjectURL(previous), 180);
         }
       } catch {
         feed.online = false;
@@ -1764,7 +1762,7 @@ PANEL_HTML = """
       stopLoops();
       refreshState();
       stateTimer = setInterval(refreshState, 600);
-      snapshotTimer = setInterval(pullSnapshots, 70);
+      snapshotTimer = setInterval(pullSnapshots, SNAPSHOT_TICK_MS);
     }
 
     function stopLoops() {
