@@ -23,7 +23,7 @@ STREAM_TOKEN = os.getenv("HXTEND_STREAM_TOKEN", os.getenv("STREAM_TOKEN", "")).s
 DEFAULT_DEVICE_ID = os.getenv("DEVICE_ID", "procesadora-01").strip()
 
 COMMAND_TIMEOUT_SECONDS = int(os.getenv("COMMAND_TIMEOUT_SECONDS", "30"))
-DEVICE_ONLINE_SECONDS = int(os.getenv("DEVICE_ONLINE_SECONDS", "30"))
+DEVICE_ONLINE_SECONDS = int(os.getenv("DEVICE_ONLINE_SECONDS", "8"))
 STREAM_ONLINE_SECONDS = float(os.getenv("HXTEND_STREAM_ONLINE_SECONDS", "3.5"))
 MAX_COMMAND_HISTORY = int(os.getenv("MAX_COMMAND_HISTORY", "1000"))
 MAX_STREAM_FRAME_BYTES = int(os.getenv("HXTEND_MAX_STREAM_FRAME_BYTES", "2500000"))
@@ -300,6 +300,14 @@ def device_status_payload(device_id: str):
     }
 
 
+def power_state_from_status(status: dict) -> str:
+    if status.get("power_on_active"):
+        return "on"
+    if status.get("power_off_active"):
+        return "off"
+    return "unknown"
+
+
 # ============================================================
 # RUTAS PÚBLICAS
 # ============================================================
@@ -452,13 +460,16 @@ def test_device_connection(
     status = device_status_payload(device_id)
     streams = stream_state_payload()
     connected = bool(status.get("online") or streams["processor_online"])
+    power_state = power_state_from_status(status)
 
     return {
         "ok": True,
         "device_id": device_id,
         "connected": connected,
+        "receiving_info": connected,
         "device_online": bool(status.get("online")),
         "processor_online": streams["processor_online"],
+        "power_state": power_state,
         "status": status,
         "feeds": streams["feeds"],
     }
@@ -814,6 +825,21 @@ PANEL_HTML = """
       align-items: center;
       gap: 12px;
       margin-bottom: 18px;
+    }
+
+    .offline-banner {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 42px;
+      margin-bottom: 14px;
+      border: 1px solid #6b2f3a;
+      border-radius: 8px;
+      background: #281219;
+      color: #ffdbe1;
+      font-weight: 850;
+      letter-spacing: 0;
+      text-align: center;
     }
 
     .mark {
@@ -1224,6 +1250,8 @@ PANEL_HTML = """
 <body>
   <section id="loginView" class="login">
     <div class="login-card">
+      <div id="offlineBanner" class="offline-banner hidden">OFFLINE</div>
+
       <div class="brand">
         <div class="mark">HX</div>
         <div>
@@ -1390,7 +1418,14 @@ PANEL_HTML = """
       $("testButton").classList.toggle("ready", ready);
     }
 
+    function setOfflineBanner(message = "") {
+      const banner = $("offlineBanner");
+      banner.textContent = message || "OFFLINE";
+      banner.classList.toggle("hidden", !message);
+    }
+
     function markLoginDirty() {
+      setOfflineBanner("");
       setLoginReady(false);
       setLoginMessage("Primero valida que la procesadora esté enviando información.");
     }
@@ -1402,6 +1437,7 @@ PANEL_HTML = """
     }
 
     function showPanel() {
+      setOfflineBanner("");
       $("loginView").classList.add("hidden");
       $("panelView").classList.remove("hidden");
       $("deviceLabel").textContent = session.deviceId;
@@ -1433,6 +1469,22 @@ PANEL_HTML = """
       return data;
     }
 
+    function describeProcessorTest(data) {
+      if (data.power_state === "on") {
+        return "Procesadora online: encendida. Puedes entrar al panel.";
+      }
+      if (data.power_state === "off") {
+        return "Procesadora online: apagada. Puedes entrar al panel.";
+      }
+      if (data.device_online) {
+        return "Procesadora online: recibiendo heartbeat. Puedes entrar al panel.";
+      }
+      if (data.processor_online) {
+        return "Procesadora online: recibiendo stream. Puedes entrar al panel.";
+      }
+      return "Procesadora online. Puedes entrar al panel.";
+    }
+
     async function testProcessorConnection(options = {}) {
       saveSession();
       setLoginReady(false);
@@ -1451,14 +1503,16 @@ PANEL_HTML = """
       try {
         const data = await fetchProcessorTest();
 
-        if (!data.connected) {
-          throw new Error("Token correcto, pero la procesadora no está enviando información.");
+        if (!data.connected || !data.receiving_info) {
+          throw new Error("Offline: la procesadora no está recibiendo información.");
         }
 
+        setOfflineBanner("");
         setLoginReady(true);
-        setLoginMessage("Procesadora online. Puedes entrar al panel.");
+        setLoginMessage(describeProcessorTest(data));
         return true;
       } catch (error) {
+        setOfflineBanner("OFFLINE");
         setLoginReady(false);
         setLoginMessage(error.message || "No se pudo validar la procesadora.");
         return false;
@@ -1483,6 +1537,7 @@ PANEL_HTML = """
 
     function logoutPanel() {
       localStorage.removeItem(STORAGE_KEY);
+      setOfflineBanner("");
       setLoginReady(false);
       showLogin();
     }
@@ -1506,8 +1561,8 @@ PANEL_HTML = """
       localStorage.removeItem(STORAGE_KEY);
       setLoginReady(false);
       showLogin();
-      setLoginMessage("offline. La procesadora no está enviando información.");
-      setTimeout(() => alert("offline"), 60);
+      setOfflineBanner("OFFLINE");
+      setLoginMessage("Offline: la procesadora dejó de enviar información. Ejecuta Test processor para volver a entrar.");
     }
 
     function isMobileLayout() {
@@ -1576,13 +1631,13 @@ PANEL_HTML = """
           throw new Error("No se pudo leer el estado");
         }
 
-        if (!processorTest.connected) {
+        if (!processorTest.connected || !processorTest.receiving_info) {
           forceOfflineLogin();
           return;
         }
 
         const data = await response.json();
-        const processorOnline = !!data.processor_online;
+        const processorOnline = !!processorTest.connected;
         setProcessorOnline(processorOnline);
 
         for (const id of Object.keys(feeds)) {
