@@ -459,15 +459,18 @@ def test_device_connection(
 
     status = device_status_payload(device_id)
     streams = stream_state_payload()
-    connected = bool(status.get("online") or streams["processor_online"])
     power_state = power_state_from_status(status)
+    device_online = bool(status.get("online"))
+    device_powered = power_state != "off"
+    connected = bool(device_online and device_powered)
 
     return {
         "ok": True,
         "device_id": device_id,
         "connected": connected,
         "receiving_info": connected,
-        "device_online": bool(status.get("online")),
+        "device_online": device_online,
+        "device_powered": device_powered,
         "processor_online": streams["processor_online"],
         "power_state": power_state,
         "status": status,
@@ -1471,18 +1474,15 @@ PANEL_HTML = """
 
     function describeProcessorTest(data) {
       if (data.power_state === "on") {
-        return "Procesadora online: encendida. Puedes entrar al panel.";
+        return "Device online y encendido. Puedes entrar al panel.";
       }
       if (data.power_state === "off") {
-        return "Procesadora online: apagada. Puedes entrar al panel.";
+        return "Device online, pero está apagado. Enciéndelo antes de entrar.";
       }
       if (data.device_online) {
-        return "Procesadora online: recibiendo heartbeat. Puedes entrar al panel.";
+        return "Device online: recibiendo heartbeat. Puedes entrar al panel.";
       }
-      if (data.processor_online) {
-        return "Procesadora online: recibiendo stream. Puedes entrar al panel.";
-      }
-      return "Procesadora online. Puedes entrar al panel.";
+      return "Device offline. No está recibiendo heartbeat.";
     }
 
     async function testProcessorConnection(options = {}) {
@@ -1503,8 +1503,16 @@ PANEL_HTML = """
       try {
         const data = await fetchProcessorTest();
 
+        if (!data.device_online) {
+          throw new Error("Offline: el device no está enviando heartbeat.");
+        }
+
+        if (!data.device_powered || data.power_state === "off") {
+          throw new Error("Device apagado. Enciéndelo antes de entrar al panel.");
+        }
+
         if (!data.connected || !data.receiving_info) {
-          throw new Error("Offline: la procesadora no está recibiendo información.");
+          throw new Error("Offline: el device no está recibiendo información válida.");
         }
 
         setOfflineBanner("");
