@@ -790,3 +790,334 @@ PANEL_HTML = """
 )
 def panel():
     return PANEL_HTML
+import fastapi as _hxtend_fastapi_module
+
+_HXTEND_DEFERRED_ROUTES = []
+_HXTEND_ORIGINAL_FASTAPI = _hxtend_fastapi_module.FastAPI
+
+
+class _HxtendDeferredApp:
+    def _route(self, method, path, **kwargs):
+        def decorator(fn):
+            _HXTEND_DEFERRED_ROUTES.append((method, path, kwargs, fn))
+            return fn
+        return decorator
+
+    def get(self, path, **kwargs):
+        return self._route("get", path, **kwargs)
+
+    def post(self, path, **kwargs):
+        return self._route("post", path, **kwargs)
+
+
+def _hxtend_install_deferred_routes(real_app):
+    for method, path, kwargs, fn in _HXTEND_DEFERRED_ROUTES:
+        getattr(real_app, method)(path, **kwargs)(fn)
+
+
+class _HxtendFastAPI(_HXTEND_ORIGINAL_FASTAPI):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        _hxtend_install_deferred_routes(self)
+
+
+_hxtend_fastapi_module.FastAPI = _HxtendFastAPI
+app = _HxtendDeferredApp()
+
+#
+# ---------------------------------------------------------------------------
+# Remote stream preview relay
+# ---------------------------------------------------------------------------
+# Render cannot access private LAN URLs such as 192.168.8.221:8001/feed.
+# The processor runs hxtend_stream_agent.py, reads the local feeds, and pushes
+# the latest JPEG frames here over HTTPS. The public panel then previews those
+# frames from Render.
+
+import asyncio as _hxtend_asyncio
+import os as _hxtend_os
+import time as _hxtend_time
+from dataclasses import dataclass as _hxtend_dataclass, field as _hxtend_field
+from typing import Dict as _HxtendDict, Optional as _HxtendOptional
+
+from fastapi import Header as _HxtendHeader, HTTPException as _HxtendHTTPException, Request as _HxtendRequest
+from fastapi.responses import HTMLResponse as _HxtendHTMLResponse
+from fastapi.responses import JSONResponse as _HxtendJSONResponse
+from fastapi.responses import Response as _HxtendResponse
+from fastapi.responses import StreamingResponse as _HxtendStreamingResponse
+
+
+_HXTEND_STREAM_TOKEN = (
+    _hxtend_os.getenv("HXTEND_STREAM_TOKEN")
+    or _hxtend_os.getenv("API_TOKEN")
+    or _hxtend_os.getenv("PANEL_TOKEN")
+    or ""
+)
+_HXTEND_STREAM_ONLINE_SECONDS = float(_hxtend_os.getenv("HXTEND_STREAM_ONLINE_SECONDS", "12"))
+
+
+@_hxtend_dataclass
+class _HxtendFeedState:
+    frame: bytes = b""
+    updated_at: float = 0.0
+    online: bool = False
+    source_url: str = ""
+    error: str = ""
+    condition: _hxtend_asyncio.Condition = _hxtend_field(default_factory=_hxtend_asyncio.Condition)
+
+
+_HXTEND_STREAMS: _HxtendDict[str, _HxtendFeedState] = {
+    "8001": _HxtendFeedState(),
+    "8002": _HxtendFeedState(),
+}
+
+
+def _hxtend_feed(feed_id: str) -> _HxtendFeedState:
+    feed_id = str(feed_id)
+    if feed_id not in _HXTEND_STREAMS:
+        _HXTEND_STREAMS[feed_id] = _HxtendFeedState()
+    return _HXTEND_STREAMS[feed_id]
+
+
+def _hxtend_authorize(authorization: _HxtendOptional[str]) -> None:
+    if not _HXTEND_STREAM_TOKEN:
+        return
+    expected = f"Bearer {_HXTEND_STREAM_TOKEN}"
+    if authorization != expected and authorization != _HXTEND_STREAM_TOKEN:
+        raise _HxtendHTTPException(status_code=401, detail="Invalid stream token")
+
+
+def _hxtend_is_online(feed: _HxtendFeedState) -> bool:
+    return bool(feed.online and feed.frame and (_hxtend_time.time() - feed.updated_at) <= _HXTEND_STREAM_ONLINE_SECONDS)
+
+
+def _hxtend_stream_state_payload():
+    now = _hxtend_time.time()
+    feeds = {}
+    any_online = False
+    for feed_id, feed in _HXTEND_STREAMS.items():
+        online = bool(feed.online and feed.frame and (now - feed.updated_at) <= _HXTEND_STREAM_ONLINE_SECONDS)
+        any_online = any_online or online
+        feeds[feed_id] = {
+            "online": online,
+            "last_seen_seconds": None if feed.updated_at <= 0 else round(now - feed.updated_at, 2),
+            "source_url": feed.source_url,
+            "has_frame": bool(feed.frame),
+            "bytes": len(feed.frame),
+            "error": feed.error,
+        }
+    return {"ok": True, "processor_online": any_online, "feeds": feeds}
+
+
+def _hxtend_remove_existing_route(path: str) -> None:
+    try:
+        app.router.routes = [route for route in app.router.routes if getattr(route, "path", None) != path]
+    except Exception:
+        pass
+
+
+@app.post("/api/stream/status")
+async def hxtend_stream_status(
+    request: _HxtendRequest,
+    authorization: _HxtendOptional[str] = _HxtendHeader(default=None),
+):
+    _hxtend_authorize(authorization)
+    payload = await request.json()
+    feed_id = str(payload.get("feed_id") or payload.get("port") or "8001")
+    feed = _hxtend_feed(feed_id)
+    feed.online = bool(payload.get("online", True))
+    feed.source_url = str(payload.get("source_url") or feed.source_url or "")
+    feed.error = str(payload.get("error") or "")
+    feed.updated_at = _hxtend_time.time()
+    return {"ok": True, "feed_id": feed_id}
+
+
+@app.post("/api/stream/frame/{feed_id}")
+async def hxtend_stream_frame(
+    feed_id: str,
+    request: _HxtendRequest,
+    authorization: _HxtendOptional[str] = _HxtendHeader(default=None),
+):
+    _hxtend_authorize(authorization)
+    frame = await request.body()
+    if not frame.startswith(b"\xff\xd8") or not frame.endswith(b"\xff\xd9"):
+        raise _HxtendHTTPException(status_code=400, detail="Expected a JPEG frame")
+    if len(frame) > 2_500_000:
+        raise _HxtendHTTPException(status_code=413, detail="Frame too large")
+
+    feed = _hxtend_feed(feed_id)
+    feed.frame = frame
+    feed.online = True
+    feed.error = ""
+    feed.updated_at = _hxtend_time.time()
+    async with feed.condition:
+        feed.condition.notify_all()
+    return {"ok": True, "feed_id": feed_id, "bytes": len(frame)}
+
+
+@app.get("/api/stream/state")
+async def hxtend_stream_state():
+    return _hxtend_stream_state_payload()
+
+
+@app.get("/api/stream/snapshot/{feed_id}")
+async def hxtend_stream_snapshot(feed_id: str):
+    feed = _hxtend_feed(feed_id)
+    if not _hxtend_is_online(feed):
+        return _HxtendResponse(status_code=204)
+    return _HxtendResponse(
+        content=feed.frame,
+        media_type="image/jpeg",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+        },
+    )
+
+
+@app.get("/api/stream/mjpeg/{feed_id}")
+async def hxtend_stream_mjpeg(feed_id: str):
+    feed = _hxtend_feed(feed_id)
+    boundary = "hxtendpreview"
+
+    async def generate():
+        last_sent_at = 0.0
+        while True:
+            if feed.frame and feed.updated_at != last_sent_at:
+                last_sent_at = feed.updated_at
+                yield (
+                    f"--{boundary}\r\n"
+                    "Content-Type: image/jpeg\r\n"
+                    f"Content-Length: {len(feed.frame)}\r\n"
+                    "Cache-Control: no-store\r\n\r\n"
+                ).encode("ascii") + feed.frame + b"\r\n"
+            async with feed.condition:
+                try:
+                    await _hxtend_asyncio.wait_for(feed.condition.wait(), timeout=2.5)
+                except _hxtend_asyncio.TimeoutError:
+                    pass
+
+    return _HxtendStreamingResponse(
+        generate(),
+        media_type=f"multipart/x-mixed-replace; boundary={boundary}",
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+    )
+
+
+_hxtend_remove_existing_route("/panel")
+
+
+@app.get("/panel", response_class=_HxtendHTMLResponse)
+async def hxtend_remote_control_panel():
+    return _HxtendHTMLResponse(
+        """
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Remote Control HxTend</title>
+  <style>
+    :root { color-scheme: dark; --bg:#080b10; --panel:#101720; --line:#223043; --text:#edf4ff; --muted:#94a3b8; --ok:#49e68b; --bad:#ff5b73; --accent:#67e8f9; }
+    * { box-sizing:border-box; }
+    body { margin:0; font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; background:radial-gradient(circle at 20% -10%,#143348 0,#080b10 35%,#05070a 100%); color:var(--text); }
+    .shell { width:min(1180px,calc(100vw - 32px)); margin:0 auto; padding:28px 0 36px; }
+    header { display:flex; align-items:center; justify-content:space-between; gap:18px; margin-bottom:20px; }
+    h1 { margin:0; font-size:clamp(26px,4vw,44px); letter-spacing:0; }
+    .subtitle { color:var(--muted); margin-top:6px; font-size:14px; }
+    .status { display:flex; align-items:center; gap:10px; padding:10px 14px; border:1px solid var(--line); border-radius:999px; background:rgba(16,23,32,.82); }
+    .dot { width:10px; height:10px; border-radius:50%; background:var(--bad); box-shadow:0 0 0 4px rgba(255,91,115,.12); }
+    .dot.on { background:var(--ok); box-shadow:0 0 0 4px rgba(73,230,139,.12); }
+    .grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
+    .card { border:1px solid var(--line); background:rgba(16,23,32,.88); border-radius:18px; overflow:hidden; box-shadow:0 18px 60px rgba(0,0,0,.28); }
+    .card-head { display:flex; justify-content:space-between; align-items:center; padding:13px 14px; border-bottom:1px solid var(--line); }
+    .card-title { font-weight:800; }
+    .badge { font-size:12px; color:var(--muted); }
+    .viewer { aspect-ratio:16/9; background:#000; position:relative; display:grid; place-items:center; }
+    .viewer img { width:100%; height:100%; object-fit:contain; display:block; }
+    .empty { position:absolute; inset:0; display:grid; place-items:center; color:var(--muted); background:linear-gradient(135deg,rgba(255,255,255,.04),rgba(255,255,255,.01)); text-align:center; padding:22px; }
+    .empty.hide { display:none; }
+    .controls { margin-top:16px; border:1px solid var(--line); background:rgba(16,23,32,.76); border-radius:18px; padding:14px; }
+    .controls h2 { margin:0 0 12px; font-size:16px; }
+    .row { display:flex; flex-wrap:wrap; gap:8px; }
+    button { border:1px solid #2c3d52; background:#172333; color:var(--text); border-radius:10px; padding:10px 12px; font-weight:750; cursor:pointer; }
+    button:hover { border-color:var(--accent); }
+    .log { margin-top:10px; color:var(--muted); font-size:13px; min-height:18px; }
+    @media (max-width:800px){ header{align-items:flex-start; flex-direction:column;} .grid{grid-template-columns:1fr;} }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <div>
+        <h1>Remote Control HxTend</h1>
+        <div class="subtitle">Panel remoto con preview fuera de la red local</div>
+      </div>
+      <div class="status"><span id="processorDot" class="dot"></span><span id="processorText">Procesadora offline</span></div>
+    </header>
+
+    <section class="grid">
+      <article class="card">
+        <div class="card-head"><span class="card-title">Screen 1</span><span id="feed8001Badge" class="badge">offline</span></div>
+        <div class="viewer"><img id="feed8001" src="/api/stream/mjpeg/8001" alt="Screen 1"><div id="feed8001Empty" class="empty">Esperando stream 8001</div></div>
+      </article>
+      <article class="card">
+        <div class="card-head"><span class="card-title">Screen 2</span><span id="feed8002Badge" class="badge">offline</span></div>
+        <div class="viewer"><img id="feed8002" src="/api/stream/mjpeg/8002" alt="Screen 2"><div id="feed8002Empty" class="empty">Esperando stream 8002</div></div>
+      </article>
+    </section>
+
+    <section class="controls">
+      <h2>Controles</h2>
+      <div class="row">
+        <button onclick="sendCommand('LED')">LED</button>
+        <button onclick="sendCommand('LED_PLUS')">LED +</button>
+        <button onclick="sendCommand('IN_OUT')">IN / OUT</button>
+        <button onclick="sendCommand('FRAME')">FRAME</button>
+        <button onclick="sendCommand('LED_MINUS')">LED -</button>
+        <button onclick="sendCommand('WHITE_BALANCE')">WHITE BALANCE</button>
+        <button onclick="sendCommand('POWER_ON_PRESS')">Presionar ON</button>
+        <button onclick="sendCommand('POWER_ON_RELEASE')">Liberar ON</button>
+        <button onclick="sendCommand('POWER_ON_TOGGLE')">Toggle ON</button>
+        <button onclick="sendCommand('POWER_OFF_PRESS')">Presionar OFF</button>
+        <button onclick="sendCommand('POWER_OFF_RELEASE')">Liberar OFF</button>
+        <button onclick="sendCommand('POWER_OFF_TOGGLE')">Toggle OFF</button>
+      </div>
+      <div id="log" class="log">Listo.</div>
+    </section>
+  </main>
+
+  <script>
+    const log = (text) => { document.getElementById('log').textContent = text; };
+    async function refreshState(){
+      const res = await fetch('/api/stream/state', { cache:'no-store' });
+      const data = await res.json();
+      const dot = document.getElementById('processorDot');
+      dot.classList.toggle('on', !!data.processor_online);
+      document.getElementById('processorText').textContent = data.processor_online ? 'Procesadora online' : 'Procesadora offline';
+      for (const id of ['8001','8002']) {
+        const feed = data.feeds[id] || {};
+        document.getElementById(`feed${id}Badge`).textContent = feed.online ? `online · ${feed.last_seen_seconds}s` : 'offline';
+        document.getElementById(`feed${id}Empty`).classList.toggle('hide', !!feed.online);
+      }
+    }
+    async function sendCommand(command){
+      const token = localStorage.getItem('hxtend_token') || '';
+      const body = JSON.stringify({ command, device_id:'procesadora-01' });
+      const headers = { 'Content-Type':'application/json' };
+      if (token) headers.Authorization = `Bearer ${token}`;
+      const endpoints = ['/api/command','/command','/api/control','/control'];
+      for (const endpoint of endpoints) {
+        try {
+          const res = await fetch(endpoint, { method:'POST', headers, body });
+          if (res.ok) { log(`${command} enviado`); return; }
+        } catch (_) {}
+      }
+      log(`${command}: no encontré endpoint de control compatible`);
+    }
+    refreshState();
+    setInterval(refreshState, 2000);
+  </script>
+</body>
+</html>
+        """
+    )
