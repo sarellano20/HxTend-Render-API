@@ -1,5 +1,6 @@
 import asyncio
 import os
+import secrets
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
@@ -20,11 +21,30 @@ app.add_middleware(
 )
 
 
-STREAM_TOKEN = (
-    os.getenv("HXTEND_STREAM_TOKEN")
-    or os.getenv("API_TOKEN")
-    or os.getenv("PANEL_TOKEN")
-    or ""
+API_TOKEN = os.getenv("API_TOKEN", "").strip()
+CONTROL_TOKENS = tuple(
+    dict.fromkeys(
+        token
+        for token in (
+            API_TOKEN,
+            os.getenv("HXTEND_CONTROL_TOKEN", "").strip(),
+            os.getenv("HXTEND_API_TOKEN", "").strip(),
+            os.getenv("HXTEND_PANEL_TOKEN", "").strip(),
+            os.getenv("CONTROL_TOKEN", "").strip(),
+            os.getenv("PANEL_TOKEN", "").strip(),
+        )
+        if token
+    )
+)
+STREAM_TOKENS = tuple(
+    dict.fromkeys(
+        token
+        for token in (
+            os.getenv("HXTEND_STREAM_TOKEN", "").strip(),
+            os.getenv("STREAM_TOKEN", "").strip(),
+        )
+        if token
+    )
 )
 ONLINE_SECONDS = float(os.getenv("HXTEND_STREAM_ONLINE_SECONDS", "12"))
 
@@ -52,11 +72,46 @@ STREAMS: Dict[str, FeedState] = {
 DEVICES: Dict[str, DeviceState] = {}
 
 
-def authorize(authorization: Optional[str]) -> None:
-    if not STREAM_TOKEN:
-        return
-    if authorization not in {STREAM_TOKEN, f"Bearer {STREAM_TOKEN}"}:
-        raise HTTPException(status_code=401, detail="Invalid token")
+def bearer_token(authorization: Optional[str]) -> str:
+    value = (authorization or "").strip()
+    if value.lower().startswith("bearer "):
+        return value[7:].strip()
+    return value
+
+
+def require_token(
+    authorization: Optional[str],
+    tokens: tuple[str, ...],
+    missing_message: str,
+    invalid_message: str,
+) -> None:
+    if not tokens:
+        raise HTTPException(status_code=500, detail=missing_message)
+
+    submitted = bearer_token(authorization)
+    if not submitted:
+        raise HTTPException(status_code=401, detail="Authorization requerido")
+
+    if not any(secrets.compare_digest(submitted, token) for token in tokens):
+        raise HTTPException(status_code=401, detail=invalid_message)
+
+
+def require_control_token(authorization: Optional[str]) -> None:
+    require_token(
+        authorization,
+        CONTROL_TOKENS,
+        "API_TOKEN no está configurado en Render",
+        "Token de control inválido",
+    )
+
+
+def require_stream_token(authorization: Optional[str]) -> None:
+    require_token(
+        authorization,
+        STREAM_TOKENS,
+        "HXTEND_STREAM_TOKEN no está configurado en Render",
+        "Token de stream inválido",
+    )
 
 
 def feed_state(feed_id: str) -> FeedState:
@@ -112,7 +167,7 @@ async def isalive():
 
 @app.post("/api/stream/status")
 async def stream_status(request: Request, authorization: Optional[str] = Header(default=None)):
-    authorize(authorization)
+    require_stream_token(authorization)
     payload = await request.json()
     feed_id = str(payload.get("feed_id") or payload.get("port") or "8001")
     feed = feed_state(feed_id)
@@ -132,7 +187,7 @@ async def stream_frame(
     request: Request,
     authorization: Optional[str] = Header(default=None),
 ):
-    authorize(authorization)
+    require_stream_token(authorization)
     frame = await request.body()
     if not frame.startswith(b"\xff\xd8") or not frame.endswith(b"\xff\xd9"):
         raise HTTPException(status_code=400, detail="Expected a JPEG frame")
@@ -198,7 +253,7 @@ async def stream_mjpeg(feed_id: str):
 
 
 async def queue_command(payload: dict, authorization: Optional[str]):
-    authorize(authorization)
+    require_control_token(authorization)
     device_id = str(payload.get("device_id") or payload.get("deviceId") or "procesadora-01")
     command = str(payload.get("command") or payload.get("cmd") or payload.get("button") or "").strip()
     if not command:
@@ -232,7 +287,7 @@ async def control(request: Request, authorization: Optional[str] = Header(defaul
 
 @app.get("/api/commands/{device_id}")
 async def get_commands(device_id: str, authorization: Optional[str] = Header(default=None)):
-    authorize(authorization)
+    require_stream_token(authorization)
     device = device_state(device_id)
     commands = list(device.commands)
     device.commands.clear()
@@ -247,7 +302,7 @@ async def get_commands_compat(device_id: str, authorization: Optional[str] = Hea
 
 @app.post("/api/device/heartbeat")
 async def device_heartbeat(request: Request, authorization: Optional[str] = Header(default=None)):
-    authorize(authorization)
+    require_stream_token(authorization)
     payload = await request.json()
     device_id = str(payload.get("device_id") or payload.get("deviceId") or "procesadora-01")
     device_state(device_id).last_seen = time.time()
@@ -272,7 +327,7 @@ async def device_state_endpoint():
 
 @app.get("/api/device/test/{device_id}")
 async def device_test(device_id: str, authorization: Optional[str] = Header(default=None)):
-    authorize(authorization)
+    require_control_token(authorization)
     now = time.time()
     device = DEVICES.get(device_id)
     device_online = bool(device and device.last_seen and (now - device.last_seen) <= ONLINE_SECONDS)
@@ -779,50 +834,3 @@ PANEL_HTML = """
 </body>
 </html>
 """
-import hmac as _hxtend_hmac
-
-
-def _hxtend_token_candidates():
-    names = (
-        "HXTEND_STREAM_TOKEN",
-        "HXTEND_CONTROL_TOKEN",
-        "HXTEND_API_TOKEN",
-        "HXTEND_PANEL_TOKEN",
-        "HXTEND_REMOTE_TOKEN",
-        "API_TOKEN",
-        "PANEL_TOKEN",
-        "CONTROL_TOKEN",
-        "STREAM_TOKEN",
-    )
-    tokens = []
-    for name in names:
-        value = os.getenv(name, "")
-        if value and value.strip():
-            tokens.append(value.strip())
-
-    for value in os.getenv("HXTEND_ALLOWED_TOKENS", "").split(","):
-        if value and value.strip():
-            tokens.append(value.strip())
-
-    return tuple(dict.fromkeys(tokens))
-
-
-def authorize(request):
-    tokens = _hxtend_token_candidates()
-    if not tokens:
-        return
-
-    raw = (request.headers.get("Authorization") or "").strip()
-    submitted = raw
-    if raw.lower().startswith("bearer "):
-        submitted = raw[7:].strip()
-
-    query_token = (request.query_params.get("token") or "").strip()
-    submitted_values = [value for value in (submitted, query_token) if value]
-
-    for submitted_value in submitted_values:
-        for expected in tokens:
-            if _hxtend_hmac.compare_digest(submitted_value, expected):
-                return
-
-    raise HTTPException(status_code=401, detail="Invalid token")
