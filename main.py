@@ -1445,6 +1445,8 @@ PANEL_HTML = """
       $("deviceLabel").textContent = session.deviceId;
       processorPreviewOn = false;
       previewRevealAt = 0;
+      setProcessorOnline(true);
+      $("controlStatus").textContent = "Listo";
       updatePreviewVisibility();
       startLoops();
     }
@@ -1620,14 +1622,8 @@ PANEL_HTML = """
         }
 
         const data = await response.value.json();
-        let processorOnline = !!data.processor_online;
-
-        if (processorTestResult.status === "fulfilled") {
-          processorOnline = !!processorTestResult.value.connected;
-        }
-
-        setProcessorOnline(processorOnline);
-        $("controlStatus").textContent = processorOnline ? "Listo" : "Offline";
+        setProcessorOnline(true);
+        $("controlStatus").textContent = "Listo";
 
         for (const id of Object.keys(feeds)) {
           const info = data.feeds[id] || {};
@@ -1643,9 +1639,9 @@ PANEL_HTML = """
         updatePreviewVisibility();
         $("lastUpdate").textContent = "Actualizado " + new Date().toLocaleTimeString();
       } catch {
-        setProcessorOnline(false);
         feeds["8001"].online = false;
-        $("controlStatus").textContent = "Offline";
+        setProcessorOnline(true);
+        $("controlStatus").textContent = "Listo";
         updatePreviewVisibility();
       }
     }
