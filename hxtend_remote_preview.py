@@ -2,22 +2,10 @@ import asyncio
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
-from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
-
-
-app = FastAPI(title="Remote Control HxTend", version="2.0.0")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+from fastapi import Header, HTTPException, Request
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 
 
 STREAM_TOKEN = (
@@ -39,24 +27,10 @@ class FeedState:
     condition: asyncio.Condition = field(default_factory=asyncio.Condition)
 
 
-@dataclass
-class DeviceState:
-    last_seen: float = 0.0
-    commands: List[dict] = field(default_factory=list)
-
-
 STREAMS: Dict[str, FeedState] = {
     "8001": FeedState(),
     "8002": FeedState(),
 }
-DEVICES: Dict[str, DeviceState] = {}
-
-
-def authorize(authorization: Optional[str]) -> None:
-    if not STREAM_TOKEN:
-        return
-    if authorization not in {STREAM_TOKEN, f"Bearer {STREAM_TOKEN}"}:
-        raise HTTPException(status_code=401, detail="Invalid token")
 
 
 def feed_state(feed_id: str) -> FeedState:
@@ -66,18 +40,18 @@ def feed_state(feed_id: str) -> FeedState:
     return STREAMS[feed_id]
 
 
-def device_state(device_id: str) -> DeviceState:
-    device_id = device_id or "procesadora-01"
-    if device_id not in DEVICES:
-        DEVICES[device_id] = DeviceState()
-    return DEVICES[device_id]
+def authorize(authorization: Optional[str]) -> None:
+    if not STREAM_TOKEN:
+        return
+    if authorization not in {STREAM_TOKEN, f"Bearer {STREAM_TOKEN}"}:
+        raise HTTPException(status_code=401, detail="Invalid stream token")
 
 
-def feed_online(feed: FeedState) -> bool:
+def is_online(feed: FeedState) -> bool:
     return bool(feed.online and feed.frame and (time.time() - feed.updated_at) <= ONLINE_SECONDS)
 
 
-def stream_state_payload():
+def state_payload():
     now = time.time()
     feeds = {}
     processor_online = False
@@ -95,182 +69,89 @@ def stream_state_payload():
     return {"ok": True, "processor_online": processor_online, "feeds": feeds}
 
 
-@app.get("/")
-async def root():
-    return {"ok": True, "name": "Remote Control HxTend", "panel": "/panel"}
+def remove_route(app, path: str) -> None:
+    app.router.routes = [route for route in app.router.routes if getattr(route, "path", None) != path]
 
 
-@app.get("/health")
-async def health():
-    return {"ok": True}
+def install_remote_preview(app) -> None:
+    @app.post("/api/stream/status")
+    async def stream_status(request: Request, authorization: Optional[str] = Header(default=None)):
+        authorize(authorization)
+        payload = await request.json()
+        feed_id = str(payload.get("feed_id") or payload.get("port") or "8001")
+        feed = feed_state(feed_id)
+        feed.online = bool(payload.get("online", True))
+        feed.source_url = str(payload.get("source_url") or feed.source_url or "")
+        feed.error = str(payload.get("error") or "")
+        feed.updated_at = time.time()
+        return {"ok": True, "feed_id": feed_id}
 
+    @app.post("/api/stream/frame/{feed_id}")
+    async def stream_frame(feed_id: str, request: Request, authorization: Optional[str] = Header(default=None)):
+        authorize(authorization)
+        frame = await request.body()
+        if not frame.startswith(b"\xff\xd8") or not frame.endswith(b"\xff\xd9"):
+            raise HTTPException(status_code=400, detail="Expected a JPEG frame")
+        if len(frame) > 2_500_000:
+            raise HTTPException(status_code=413, detail="Frame too large")
 
-@app.get("/isalive")
-async def isalive():
-    return "ok"
+        feed = feed_state(feed_id)
+        feed.frame = frame
+        feed.online = True
+        feed.error = ""
+        feed.updated_at = time.time()
+        async with feed.condition:
+            feed.condition.notify_all()
+        return {"ok": True, "feed_id": feed_id, "bytes": len(frame)}
 
+    @app.get("/api/stream/state")
+    async def stream_state():
+        return state_payload()
 
-@app.post("/api/stream/status")
-async def stream_status(request: Request, authorization: Optional[str] = Header(default=None)):
-    authorize(authorization)
-    payload = await request.json()
-    feed_id = str(payload.get("feed_id") or payload.get("port") or "8001")
-    feed = feed_state(feed_id)
-    feed.online = bool(payload.get("online", True))
-    feed.source_url = str(payload.get("source_url") or feed.source_url or "")
-    feed.error = str(payload.get("error") or "")
-    feed.updated_at = time.time()
+    @app.get("/api/stream/snapshot/{feed_id}")
+    async def stream_snapshot(feed_id: str):
+        feed = feed_state(feed_id)
+        if not is_online(feed):
+            return Response(status_code=204)
+        return Response(
+            content=feed.frame,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+        )
 
-    device_id = str(payload.get("device_id") or "procesadora-01")
-    device_state(device_id).last_seen = time.time()
-    return {"ok": True, "feed_id": feed_id}
+    @app.get("/api/stream/mjpeg/{feed_id}")
+    async def stream_mjpeg(feed_id: str):
+        feed = feed_state(feed_id)
+        boundary = "hxtendpreview"
 
+        async def generate():
+            last_sent_at = 0.0
+            while True:
+                if feed.frame and feed.updated_at != last_sent_at:
+                    last_sent_at = feed.updated_at
+                    yield (
+                        f"--{boundary}\r\n"
+                        "Content-Type: image/jpeg\r\n"
+                        f"Content-Length: {len(feed.frame)}\r\n"
+                        "Cache-Control: no-store\r\n\r\n"
+                    ).encode("ascii") + feed.frame + b"\r\n"
+                async with feed.condition:
+                    try:
+                        await asyncio.wait_for(feed.condition.wait(), timeout=2.5)
+                    except asyncio.TimeoutError:
+                        pass
 
-@app.post("/api/stream/frame/{feed_id}")
-async def stream_frame(
-    feed_id: str,
-    request: Request,
-    authorization: Optional[str] = Header(default=None),
-):
-    authorize(authorization)
-    frame = await request.body()
-    if not frame.startswith(b"\xff\xd8") or not frame.endswith(b"\xff\xd9"):
-        raise HTTPException(status_code=400, detail="Expected a JPEG frame")
-    if len(frame) > 2_500_000:
-        raise HTTPException(status_code=413, detail="Frame too large")
+        return StreamingResponse(
+            generate(),
+            media_type=f"multipart/x-mixed-replace; boundary={boundary}",
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+        )
 
-    feed = feed_state(feed_id)
-    feed.frame = frame
-    feed.online = True
-    feed.error = ""
-    feed.updated_at = time.time()
-    async with feed.condition:
-        feed.condition.notify_all()
-    return {"ok": True, "feed_id": feed_id, "bytes": len(frame)}
+    remove_route(app, "/panel")
 
-
-@app.get("/api/stream/state")
-async def stream_state():
-    return stream_state_payload()
-
-
-@app.get("/api/stream/snapshot/{feed_id}")
-async def stream_snapshot(feed_id: str):
-    feed = feed_state(feed_id)
-    if not feed_online(feed):
-        return Response(status_code=204)
-    return Response(
-        content=feed.frame,
-        media_type="image/jpeg",
-        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
-    )
-
-
-@app.get("/api/stream/mjpeg/{feed_id}")
-async def stream_mjpeg(feed_id: str):
-    feed = feed_state(feed_id)
-    boundary = "hxtendpreview"
-
-    async def generate():
-        last_sent_at = 0.0
-        while True:
-            if feed.frame and feed.updated_at != last_sent_at:
-                last_sent_at = feed.updated_at
-                yield (
-                    f"--{boundary}\r\n"
-                    "Content-Type: image/jpeg\r\n"
-                    f"Content-Length: {len(feed.frame)}\r\n"
-                    "Cache-Control: no-store\r\n\r\n"
-                ).encode("ascii") + feed.frame + b"\r\n"
-            async with feed.condition:
-                try:
-                    await asyncio.wait_for(feed.condition.wait(), timeout=2.5)
-                except asyncio.TimeoutError:
-                    pass
-
-    return StreamingResponse(
-        generate(),
-        media_type=f"multipart/x-mixed-replace; boundary={boundary}",
-        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
-    )
-
-
-async def queue_command(payload: dict, authorization: Optional[str]):
-    authorize(authorization)
-    device_id = str(payload.get("device_id") or payload.get("deviceId") or "procesadora-01")
-    command = str(payload.get("command") or payload.get("cmd") or payload.get("button") or "").strip()
-    if not command:
-        raise HTTPException(status_code=400, detail="Missing command")
-    item = {"command": command, "created_at": time.time()}
-    device = device_state(device_id)
-    device.commands.append(item)
-    device.commands = device.commands[-100:]
-    return {"ok": True, "device_id": device_id, "command": command}
-
-
-@app.post("/api/command")
-async def api_command(request: Request, authorization: Optional[str] = Header(default=None)):
-    return await queue_command(await request.json(), authorization)
-
-
-@app.post("/command")
-async def command(request: Request, authorization: Optional[str] = Header(default=None)):
-    return await queue_command(await request.json(), authorization)
-
-
-@app.post("/api/control")
-async def api_control(request: Request, authorization: Optional[str] = Header(default=None)):
-    return await queue_command(await request.json(), authorization)
-
-
-@app.post("/control")
-async def control(request: Request, authorization: Optional[str] = Header(default=None)):
-    return await queue_command(await request.json(), authorization)
-
-
-@app.get("/api/commands/{device_id}")
-async def get_commands(device_id: str, authorization: Optional[str] = Header(default=None)):
-    authorize(authorization)
-    device = device_state(device_id)
-    commands = list(device.commands)
-    device.commands.clear()
-    device.last_seen = time.time()
-    return {"ok": True, "device_id": device_id, "commands": commands}
-
-
-@app.get("/commands/{device_id}")
-async def get_commands_compat(device_id: str, authorization: Optional[str] = Header(default=None)):
-    return await get_commands(device_id, authorization)
-
-
-@app.post("/api/device/heartbeat")
-async def device_heartbeat(request: Request, authorization: Optional[str] = Header(default=None)):
-    authorize(authorization)
-    payload = await request.json()
-    device_id = str(payload.get("device_id") or payload.get("deviceId") or "procesadora-01")
-    device_state(device_id).last_seen = time.time()
-    return {"ok": True, "device_id": device_id}
-
-
-@app.get("/api/device/state")
-async def device_state_endpoint():
-    now = time.time()
-    return {
-        "ok": True,
-        "devices": {
-            device_id: {
-                "online": (now - state.last_seen) <= ONLINE_SECONDS if state.last_seen else False,
-                "last_seen_seconds": None if not state.last_seen else round(now - state.last_seen, 2),
-                "queued_commands": len(state.commands),
-            }
-            for device_id, state in DEVICES.items()
-        },
-    }
-
-
-@app.get("/panel", response_class=HTMLResponse)
-async def panel():
-    return HTMLResponse(PANEL_HTML)
+    @app.get("/panel", response_class=HTMLResponse)
+    async def panel():
+        return HTMLResponse(PANEL_HTML)
 
 
 PANEL_HTML = """
@@ -365,8 +246,7 @@ PANEL_HTML = """
       }
       log(`${command}: endpoint de control no disponible`);
     }
-    refreshState();
-    setInterval(refreshState, 2000);
+    refreshState(); setInterval(refreshState, 2000);
   </script>
 </body>
 </html>
