@@ -847,6 +847,28 @@ PANEL_HTML = """
 
     .primary:hover { background: #146d86; }
 
+    .login-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .login-actions .primary {
+      margin-top: 0;
+    }
+
+    .secondary-action {
+      background: #1d2a35;
+      border-color: #334554;
+    }
+
+    .secondary-action.ready {
+      border-color: #2f6d58;
+      background: #15352d;
+      color: #e9fff6;
+    }
+
     .login-message {
       min-height: 22px;
       margin-top: 12px;
@@ -1193,6 +1215,10 @@ PANEL_HTML = """
         padding: 16px;
       }
     }
+
+    @media (max-width: 430px) {
+      .login-actions { grid-template-columns: 1fr; }
+    }
   </style>
 </head>
 <body>
@@ -1216,8 +1242,11 @@ PANEL_HTML = """
         <input id="tokenInput" type="password" autocomplete="current-password" placeholder="API_TOKEN configurado en Render">
       </div>
 
-      <button id="connectButton" class="primary" onclick="connectPanel()">Conectar</button>
-      <div id="loginMessage" class="login-message">El token se guarda solo en este navegador.</div>
+      <div class="login-actions">
+        <button id="testButton" class="secondary-action" onclick="testProcessorConnection()">Test processor</button>
+        <button id="enterButton" class="primary" onclick="enterPanel()" disabled>Entrar al panel</button>
+      </div>
+      <div id="loginMessage" class="login-message">Primero valida que la procesadora esté enviando información.</div>
     </div>
   </section>
 
@@ -1311,6 +1340,8 @@ PANEL_HTML = """
       token: ""
     };
 
+    let loginTestPassed = false;
+    let forcingOffline = false;
     let processorPreviewOn = false;
     let previewRevealAt = 0;
     let previewRevealTimer = null;
@@ -1353,6 +1384,17 @@ PANEL_HTML = """
       localStorage.setItem("hxtend_device", session.deviceId);
     }
 
+    function setLoginReady(ready) {
+      loginTestPassed = ready;
+      $("enterButton").disabled = !ready;
+      $("testButton").classList.toggle("ready", ready);
+    }
+
+    function markLoginDirty() {
+      setLoginReady(false);
+      setLoginMessage("Primero valida que la procesadora esté enviando información.");
+    }
+
     function setLoginMessage(message, loading = false) {
       $("loginMessage").innerHTML = loading
         ? `<span class="loader"></span>${message}`
@@ -1363,6 +1405,7 @@ PANEL_HTML = """
       $("loginView").classList.add("hidden");
       $("panelView").classList.remove("hidden");
       $("deviceLabel").textContent = session.deviceId;
+      forcingOffline = false;
       processorPreviewOn = false;
       previewRevealAt = 0;
       updatePreviewVisibility();
@@ -1375,46 +1418,96 @@ PANEL_HTML = """
       $("loginView").classList.remove("hidden");
     }
 
-    async function connectPanel() {
+    async function fetchProcessorTest() {
+      const response = await fetch(`/api/device/test/${encodeURIComponent(session.deviceId)}`, {
+        cache: "no-store",
+        headers: authHeaders()
+      });
+
+      const data = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        throw new Error(data.detail || "Token inválido");
+      }
+
+      return data;
+    }
+
+    async function testProcessorConnection(options = {}) {
       saveSession();
+      setLoginReady(false);
 
       if (!session.token) {
         setLoginMessage("Ingresa el API_TOKEN de Render.");
-        return;
+        return false;
       }
 
-      $("connectButton").disabled = true;
-      setLoginMessage("Comprobando conexión...", true);
+      $("testButton").disabled = true;
+      $("enterButton").disabled = true;
+      if (!options.silent) {
+        setLoginMessage("Validando señal de la procesadora...", true);
+      }
 
       try {
-        const response = await fetch(`/api/device/test/${encodeURIComponent(session.deviceId)}`, {
-          cache: "no-store",
-          headers: authHeaders()
-        });
+        const data = await fetchProcessorTest();
 
-        const data = await response.json().catch(() => ({}));
-
-        if (!response.ok) {
-          throw new Error(data.detail || "Token inválido");
+        if (!data.connected) {
+          throw new Error("Token correcto, pero la procesadora no está enviando información.");
         }
 
-        setLoginMessage(data.connected ? "Conectado." : "Token correcto. Procesadora en espera.");
-        showPanel();
+        setLoginReady(true);
+        setLoginMessage("Procesadora online. Puedes entrar al panel.");
+        return true;
       } catch (error) {
-        setLoginMessage(error.message || "No se pudo conectar.");
+        setLoginReady(false);
+        setLoginMessage(error.message || "No se pudo validar la procesadora.");
+        return false;
       } finally {
-        $("connectButton").disabled = false;
+        $("testButton").disabled = false;
+      }
+    }
+
+    async function enterPanel() {
+      if (!loginTestPassed) {
+        const ok = await testProcessorConnection();
+        if (!ok) {
+          return;
+        }
+      }
+
+      const ok = await testProcessorConnection({ silent: true });
+      if (ok) {
+        showPanel();
       }
     }
 
     function logoutPanel() {
       localStorage.removeItem(STORAGE_KEY);
+      setLoginReady(false);
       showLogin();
     }
 
     function setProcessorOnline(online) {
       $("processorDot").classList.toggle("on", online);
       $("processorText").textContent = online ? "Procesadora online" : "Procesadora offline";
+    }
+
+    function forceOfflineLogin() {
+      if (forcingOffline) {
+        return;
+      }
+
+      forcingOffline = true;
+      processorPreviewOn = false;
+      previewRevealAt = 0;
+      feeds["8001"].online = false;
+      releaseFeedImage("8001");
+      setProcessorOnline(false);
+      localStorage.removeItem(STORAGE_KEY);
+      setLoginReady(false);
+      showLogin();
+      setLoginMessage("offline. La procesadora no está enviando información.");
+      setTimeout(() => alert("offline"), 60);
     }
 
     function isMobileLayout() {
@@ -1471,13 +1564,21 @@ PANEL_HTML = """
 
     async function refreshState() {
       try {
-        const response = await fetch("/api/stream/state", {
-          cache: "no-store",
-          headers: authHeaders()
-        });
+        const [response, processorTest] = await Promise.all([
+          fetch("/api/stream/state", {
+            cache: "no-store",
+            headers: authHeaders()
+          }),
+          fetchProcessorTest()
+        ]);
 
         if (!response.ok) {
           throw new Error("No se pudo leer el estado");
+        }
+
+        if (!processorTest.connected) {
+          forceOfflineLogin();
+          return;
         }
 
         const data = await response.json();
@@ -1498,10 +1599,7 @@ PANEL_HTML = """
         updatePreviewVisibility();
         $("lastUpdate").textContent = "Actualizado " + new Date().toLocaleTimeString();
       } catch {
-        setProcessorOnline(false);
-        feeds["8001"].online = false;
-        updatePreviewVisibility();
-        $("controlStatus").textContent = "Sin estado";
+        forceOfflineLogin();
       }
     }
 
@@ -1643,9 +1741,12 @@ PANEL_HTML = """
     }
 
     loadStoredSession();
+    setLoginReady(false);
+    $("deviceInput").addEventListener("input", markLoginDirty);
+    $("tokenInput").addEventListener("input", markLoginDirty);
 
     if (session.token) {
-      connectPanel();
+      setLoginMessage("Token guardado. Ejecuta Test processor para validar la procesadora.");
     }
   </script>
 </body>
