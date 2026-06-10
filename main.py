@@ -144,6 +144,8 @@ async def stream_frame(
     feed.online = True
     feed.error = ""
     feed.updated_at = time.time()
+    device_id = str(request.query_params.get("device_id") or "procesadora-01")
+    device_state(device_id).last_seen = time.time()
     async with feed.condition:
         feed.condition.notify_all()
     return {"ok": True, "feed_id": feed_id, "bytes": len(frame)}
@@ -268,6 +270,25 @@ async def device_state_endpoint():
     }
 
 
+@app.get("/api/device/test/{device_id}")
+async def device_test(device_id: str, authorization: Optional[str] = Header(default=None)):
+    authorize(authorization)
+    now = time.time()
+    device = DEVICES.get(device_id)
+    device_online = bool(device and device.last_seen and (now - device.last_seen) <= ONLINE_SECONDS)
+    streams = stream_state_payload()
+    connected = bool(device_online or streams["processor_online"])
+    return {
+        "ok": True,
+        "device_id": device_id,
+        "connected": connected,
+        "device_online": device_online,
+        "processor_online": streams["processor_online"],
+        "feeds": streams["feeds"],
+        "last_seen_seconds": None if not device or not device.last_seen else round(now - device.last_seen, 2),
+    }
+
+
 @app.get("/panel", response_class=HTMLResponse)
 async def panel():
     return HTMLResponse(PANEL_HTML)
@@ -367,6 +388,393 @@ PANEL_HTML = """
     }
     refreshState();
     setInterval(refreshState, 2000);
+  </script>
+</body>
+</html>
+"""
+
+
+PANEL_HTML = """
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>Remote Control HxTend</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #070a0f;
+      --panel: rgba(14, 20, 30, .92);
+      --panel2: rgba(20, 29, 42, .86);
+      --line: rgba(148, 163, 184, .18);
+      --text: #eef6ff;
+      --muted: #9aa9bb;
+      --ok: #50e68c;
+      --bad: #ff5b73;
+      --accent: #67e8f9;
+      --button: #172233;
+    }
+    * { box-sizing: border-box; }
+    html, body { min-height: 100%; }
+    body {
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at 18% -8%, rgba(33, 150, 181, .28), transparent 34%),
+        radial-gradient(circle at 90% 0%, rgba(80, 230, 140, .12), transparent 30%),
+        linear-gradient(180deg, #09111b, var(--bg));
+      color: var(--text);
+    }
+    .screen {
+      width: min(1180px, calc(100vw - 28px));
+      margin: 0 auto;
+      padding: max(18px, env(safe-area-inset-top)) 0 34px;
+    }
+    .auth {
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 22px 0;
+    }
+    .login-card {
+      width: min(460px, calc(100vw - 28px));
+      border: 1px solid var(--line);
+      background: linear-gradient(180deg, rgba(14,20,30,.96), rgba(9,14,22,.94));
+      border-radius: 22px;
+      padding: 22px;
+      box-shadow: 0 24px 80px rgba(0,0,0,.38);
+    }
+    .brand { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:18px; }
+    .brand h1 { margin:0; font-size: clamp(27px, 8vw, 42px); line-height:1; letter-spacing:0; }
+    .brand span { color: var(--muted); font-size: 13px; display:block; margin-top:8px; }
+    .orb { width: 44px; height: 44px; border-radius: 14px; border:1px solid rgba(103,232,249,.38); background: rgba(103,232,249,.12); display:grid; place-items:center; font-weight:900; color:var(--accent); }
+    label { display:block; font-size: 12px; color: var(--muted); margin: 14px 0 7px; font-weight: 750; }
+    input {
+      width: 100%;
+      border: 1px solid var(--line);
+      background: rgba(2, 6, 12, .72);
+      color: var(--text);
+      border-radius: 13px;
+      padding: 13px 14px;
+      font-size: 15px;
+      outline: none;
+    }
+    input:focus { border-color: rgba(103,232,249,.68); box-shadow: 0 0 0 4px rgba(103,232,249,.10); }
+    .login-actions { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:16px; }
+    button {
+      border: 1px solid rgba(148,163,184,.20);
+      background: var(--button);
+      color: var(--text);
+      border-radius: 13px;
+      padding: 12px 14px;
+      font-weight: 800;
+      cursor: pointer;
+      min-height: 44px;
+      transition: border-color .16s ease, transform .16s ease, background .16s ease;
+    }
+    button:hover { border-color: rgba(103,232,249,.72); background: #1c2a3d; }
+    button:active { transform: translateY(1px); }
+    button.primary { background: linear-gradient(135deg, #128da3, #176b53); border-color: rgba(103,232,249,.45); }
+    button.ghost { background: rgba(255,255,255,.045); }
+    .message { min-height: 22px; margin-top: 13px; color: var(--muted); font-size: 13px; }
+    .message.ok { color: var(--ok); }
+    .message.bad { color: var(--bad); }
+    .loader {
+      width: 18px; height: 18px; border-radius:50%;
+      border: 2px solid rgba(255,255,255,.28); border-top-color: var(--accent);
+      display:inline-block; vertical-align:-4px; margin-right:8px;
+      animation: spin .7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .app { display:none; }
+    .topbar {
+      display:flex; align-items:center; justify-content:space-between; gap:14px;
+      margin: 8px 0 16px;
+    }
+    .title h1 { margin:0; font-size: clamp(24px, 5vw, 40px); letter-spacing:0; }
+    .title p { margin:7px 0 0; color:var(--muted); font-size:14px; }
+    .status-pill {
+      display:flex; align-items:center; gap:9px;
+      border:1px solid var(--line); background:rgba(14,20,30,.76);
+      padding:10px 13px; border-radius:999px; white-space:nowrap;
+      color: var(--muted); font-size: 13px; font-weight: 750;
+    }
+    .dot { width:10px; height:10px; border-radius:50%; background:var(--bad); box-shadow:0 0 0 4px rgba(255,91,115,.13); }
+    .dot.on { background:var(--ok); box-shadow:0 0 0 4px rgba(80,230,140,.13); }
+    .preview-grid {
+      display:none;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+      margin-bottom: 14px;
+    }
+    .preview-grid.show { display:grid; }
+    .stream-card {
+      overflow:hidden;
+      border:1px solid var(--line);
+      background: #000;
+      border-radius: 18px;
+      box-shadow: 0 18px 70px rgba(0,0,0,.28);
+    }
+    .stream-head {
+      display:flex; align-items:center; justify-content:space-between;
+      background: rgba(14,20,30,.94);
+      border-bottom:1px solid var(--line);
+      padding: 12px 13px;
+    }
+    .stream-title { font-weight: 850; }
+    .badge { font-size: 12px; color: var(--muted); }
+    .viewer { aspect-ratio: 16/9; background:#000; display:grid; place-items:center; }
+    .viewer img { width:100%; height:100%; object-fit:contain; display:block; }
+    .empty-state {
+      border:1px solid var(--line);
+      background: var(--panel);
+      border-radius: 18px;
+      padding: 18px;
+      color: var(--muted);
+      margin-bottom: 14px;
+      display:block;
+    }
+    .empty-state.hide { display:none; }
+    .control-panel {
+      border:1px solid var(--line);
+      background: var(--panel);
+      border-radius: 18px;
+      padding: 15px;
+    }
+    .control-head {
+      display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:12px;
+    }
+    .control-head h2 { margin:0; font-size:17px; }
+    .control-grid {
+      display:grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap:10px;
+    }
+    .led-group {
+      display:grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap:8px;
+      grid-column: span 2;
+      border:1px solid var(--line);
+      background: rgba(255,255,255,.035);
+      border-radius:15px;
+      padding:8px;
+    }
+    .led-group .label {
+      grid-column: 1 / -1;
+      color:var(--muted);
+      font-size:12px;
+      font-weight:800;
+      padding:0 2px;
+    }
+    .session-actions { display:flex; gap:8px; flex-wrap:wrap; }
+    .log { color:var(--muted); font-size:13px; min-height:20px; margin-top:12px; }
+    @media (max-width: 900px) {
+      .preview-grid { grid-template-columns: 1fr; }
+      .control-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .led-group { grid-column: 1 / -1; }
+      .topbar { align-items:flex-start; flex-direction:column; }
+    }
+    @media (max-width: 520px) {
+      .screen { width: min(100vw - 18px, 1180px); padding-bottom: 22px; }
+      .login-card { width: calc(100vw - 18px); padding: 18px; border-radius: 18px; }
+      .login-actions { grid-template-columns:1fr; }
+      .control-grid { grid-template-columns:1fr; }
+      .control-panel, .empty-state, .stream-card { border-radius: 15px; }
+      button { width:100%; }
+      .session-actions { width:100%; }
+    }
+  </style>
+</head>
+<body>
+  <section id="authScreen" class="auth">
+    <div class="login-card">
+      <div class="brand">
+        <div>
+          <h1>Remote Control HxTend</h1>
+          <span>Conecta la procesadora para abrir el panel remoto</span>
+        </div>
+        <div class="orb">HX</div>
+      </div>
+
+      <label for="deviceIdInput">Device ID</label>
+      <input id="deviceIdInput" autocomplete="username" placeholder="procesadora-01">
+
+      <label for="tokenInput">API token</label>
+      <input id="tokenInput" autocomplete="current-password" type="password" placeholder="Token privado">
+
+      <div class="login-actions">
+        <button class="ghost" onclick="saveSession()">Guardar</button>
+        <button id="testButton" class="primary" onclick="testAndEnter()">Test connection</button>
+      </div>
+      <div id="authMessage" class="message">Los datos se guardan solo en este navegador.</div>
+    </div>
+  </section>
+
+  <main id="appScreen" class="screen app">
+    <div class="topbar">
+      <div class="title">
+        <h1>Remote Control HxTend</h1>
+        <p id="sessionSubtitle">Panel remoto</p>
+      </div>
+      <div class="status-pill"><span id="processorDot" class="dot"></span><span id="processorText">Procesadora offline</span></div>
+    </div>
+
+    <section id="previewGrid" class="preview-grid">
+      <article id="card8001" class="stream-card">
+        <div class="stream-head"><span class="stream-title">Monitor 1</span><span id="feed8001Badge" class="badge">offline</span></div>
+        <div class="viewer"><img id="feed8001" alt="Monitor 1"></div>
+      </article>
+      <article id="card8002" class="stream-card">
+        <div class="stream-head"><span class="stream-title">Monitor 2</span><span id="feed8002Badge" class="badge">offline</span></div>
+        <div class="viewer"><img id="feed8002" alt="Monitor 2"></div>
+      </article>
+    </section>
+
+    <div id="emptyStream" class="empty-state">Procesadora conectada al panel. Esperando transmisión activa para mostrar monitores.</div>
+
+    <section class="control-panel">
+      <div class="control-head">
+        <h2>Controls</h2>
+        <div class="session-actions">
+          <button class="ghost" onclick="testConnection()">Test</button>
+          <button class="ghost" onclick="changeConnection()">Cambiar datos</button>
+        </div>
+      </div>
+      <div class="control-grid">
+        <div class="led-group">
+          <div class="label">LED</div>
+          <button onclick="sendCommand('LED_MINUS')">LED -</button>
+          <button onclick="sendCommand('LED')">LED</button>
+          <button onclick="sendCommand('LED_PLUS')">LED +</button>
+        </div>
+        <button onclick="sendCommand('IN_OUT')">IN / OUT</button>
+        <button onclick="sendCommand('FRAME')">Frame</button>
+        <button onclick="sendCommand('WHITE_BALANCE')">White balance</button>
+        <button onclick="sendCommand('POWER_ON_TOGGLE')">Toggle ON</button>
+        <button onclick="sendCommand('POWER_OFF_TOGGLE')">Toggle OFF</button>
+      </div>
+      <div id="panelLog" class="log">Listo.</div>
+    </section>
+  </main>
+
+  <script>
+    const STORAGE_KEY = 'hxtend_remote_session_v2';
+    let session = { deviceId: 'procesadora-01', token: '' };
+    let stateTimer = null;
+
+    function $(id){ return document.getElementById(id); }
+    function setAuthMessage(text, type=''){ const el=$('authMessage'); el.className='message ' + type; el.innerHTML=text; }
+    function setPanelLog(text){ $('panelLog').textContent = text; }
+    function authHeaders(){
+      const headers = { 'Content-Type': 'application/json' };
+      if (session.token) headers.Authorization = `Bearer ${session.token}`;
+      return headers;
+    }
+    function loadSession(){
+      try {
+        const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+        session.deviceId = saved.deviceId || 'procesadora-01';
+        session.token = saved.token || '';
+      } catch (_) {}
+      $('deviceIdInput').value = session.deviceId;
+      $('tokenInput').value = session.token;
+    }
+    function saveSession(){
+      session = {
+        deviceId: $('deviceIdInput').value.trim() || 'procesadora-01',
+        token: $('tokenInput').value.trim()
+      };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(session));
+      setAuthMessage('Datos guardados en este navegador.', 'ok');
+    }
+    async function testConnection(){
+      const res = await fetch(`/api/device/test/${encodeURIComponent(session.deviceId)}`, {
+        headers: session.token ? { Authorization: `Bearer ${session.token}` } : {},
+        cache: 'no-store'
+      });
+      if (!res.ok) throw new Error(res.status === 401 ? 'Token inválido.' : 'No se pudo comprobar el dispositivo.');
+      return await res.json();
+    }
+    async function testAndEnter(){
+      saveSession();
+      const btn = $('testButton');
+      btn.disabled = true;
+      btn.innerHTML = '<span class="loader"></span>Conectando';
+      setAuthMessage('Comprobando respuesta del dispositivo...');
+      try {
+        const data = await testConnection();
+        if (!data.connected) {
+          setAuthMessage('Token correcto, pero la procesadora todavía no está enviando señal a Render.', 'bad');
+          return;
+        }
+        setAuthMessage('Conectado. Abriendo panel...', 'ok');
+        setTimeout(showPanel, 450);
+      } catch (err) {
+        setAuthMessage(err.message || 'No se pudo conectar.', 'bad');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Test connection';
+      }
+    }
+    function showPanel(){
+      $('authScreen').style.display = 'none';
+      $('appScreen').style.display = 'block';
+      $('sessionSubtitle').textContent = `Device ID: ${session.deviceId}`;
+      refreshState();
+      if (stateTimer) clearInterval(stateTimer);
+      stateTimer = setInterval(refreshState, 2000);
+    }
+    function changeConnection(){
+      $('appScreen').style.display = 'none';
+      $('authScreen').style.display = 'grid';
+      if (stateTimer) clearInterval(stateTimer);
+    }
+    function setFeedImage(feedId, online){
+      const card = $(`card${feedId}`);
+      const img = $(`feed${feedId}`);
+      card.style.display = online ? 'block' : 'none';
+      if (online && !img.src) img.src = `/api/stream/mjpeg/${feedId}`;
+      if (!online) img.removeAttribute('src');
+    }
+    async function refreshState(){
+      try {
+        const res = await fetch('/api/stream/state', { cache:'no-store' });
+        const data = await res.json();
+        const dot = $('processorDot');
+        dot.classList.toggle('on', !!data.processor_online);
+        $('processorText').textContent = data.processor_online ? 'Procesadora online' : 'Procesadora offline';
+
+        let anyStream = false;
+        for (const id of ['8001','8002']) {
+          const feed = data.feeds[id] || {};
+          const online = !!feed.online;
+          anyStream = anyStream || online;
+          $(`feed${id}Badge`).textContent = online ? `online · ${feed.last_seen_seconds}s` : 'offline';
+          setFeedImage(id, online);
+        }
+        $('previewGrid').classList.toggle('show', anyStream);
+        $('emptyStream').classList.toggle('hide', anyStream);
+      } catch (err) {
+        $('processorDot').classList.remove('on');
+        $('processorText').textContent = 'Sin conexión con Render';
+      }
+    }
+    async function sendCommand(command){
+      try {
+        const res = await fetch('/api/command', {
+          method: 'POST',
+          headers: authHeaders(),
+          body: JSON.stringify({ command, device_id: session.deviceId })
+        });
+        if (!res.ok) throw new Error(res.status === 401 ? 'Token inválido.' : 'No se pudo enviar.');
+        setPanelLog(`${command} enviado`);
+      } catch (err) {
+        setPanelLog(err.message || 'Error enviando comando');
+      }
+    }
+    loadSession();
   </script>
 </body>
 </html>
